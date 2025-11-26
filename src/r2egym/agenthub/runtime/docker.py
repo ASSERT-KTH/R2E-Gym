@@ -4,8 +4,13 @@ from time import sleep
 import time
 import uuid
 import tempfile
-import docker
-from docker.models.containers import Container
+try:
+    import docker
+    from docker.models.containers import Container
+except ImportError:
+    docker = None
+    Container = object # Dummy class
+
 
 from r2egym.repo_analysis.execution_log_parser import parse_log_fn, decolor_dict_keys
 from r2egym.agenthub.runtime.base import (
@@ -18,8 +23,17 @@ import hashlib
 import shutil
 import uuid
 
-import docker
-import kubernetes
+
+try:
+    import kubernetes
+    from kubernetes import client, config, watch
+    from kubernetes.stream import stream
+except ImportError:
+    kubernetes = None
+    client = None
+    config = None
+    watch = None
+    stream = None
 import tarfile
 import io
 import os
@@ -38,10 +52,10 @@ from r2egym.agenthub.utils.utils import get_logger
 from r2egym.commit_models.diff_classes import ParsedCommit
 from r2egym.swesmith.utils import get_test_command
 
-from kubernetes import client, config, watch
+
 
 # For Kubernetes exec.
-from kubernetes.stream import stream
+
 
 DEFAULT_NAMESPACE = "default"
 DOCKER_PATH = "/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -93,7 +107,7 @@ class DockerRuntime(ExecutionEnvironment):
     ):
         # check if ds is provided (required for all dockers moving forward)
         assert ds, f"Dataset not provided for docker image: {docker_image}"
-        assert backend in ["docker", "kubernetes"], f"Invalid backend: {backend}"
+        assert backend in ["docker", "kubernetes", "apptainer"], f"Invalid backend: {backend}"
         # swebench specific setup
         self.ds = ds
         self.backend = backend
@@ -136,6 +150,8 @@ class DockerRuntime(ExecutionEnvironment):
                 logger_name = "DockerRuntime"
             elif self.backend == "kubernetes":
                 logger_name = "KubernetesRuntime"
+            elif self.backend == "apptainer":
+                logger_name = "ApptainerRuntime"
             else:
                 raise ValueError(f"Invalid backend: {self.backend}")
             self.logger = get_logger(logger_name)  # Pass the module name for clarity
@@ -151,6 +167,8 @@ class DockerRuntime(ExecutionEnvironment):
             except Exception:
                 config.load_kube_config()
             self.client = client.CoreV1Api()
+        elif self.backend == "apptainer":
+            pass # No client needed for apptainer (using subprocess)
 
         # Start the container
         self.container = None
@@ -166,6 +184,8 @@ class DockerRuntime(ExecutionEnvironment):
         self.setup_env()
         if self.backend == "kubernetes":
             self.logger.info("Kubernetes environment initialized")
+        elif self.backend == "apptainer":
+            self.logger.info("Apptainer environment initialized")
         else:
             self.logger.info("Docker environment initialized")
         self.logger.info("repo name: %s", self.repo_name)
@@ -180,6 +200,8 @@ class DockerRuntime(ExecutionEnvironment):
                 else "N/A"
             )
             self.logger.info("Pod Name: %s", pod_name)
+        elif self.backend == "apptainer":
+            self.logger.info("Instance Name: %s", self.container_name)
 
     @staticmethod
     def _get_container_name(image_name: str) -> str:
@@ -347,6 +369,148 @@ class DockerRuntime(ExecutionEnvironment):
                 self.logger.error(f"Failed to check pod status after watch error: {status_error}")
                 raise RuntimeError(f"Failed to verify pod status: {status_error}")
 
+    def _start_apptainer_instance(
+        self, docker_image: str, command: str, instance_name: str, **docker_kwargs
+    ):
+        """
+        Starts an Apptainer instance.
+        """
+        try:
+            # Check if instance already exists
+            check_cmd = ["apptainer", "instance", "list", instance_name]
+            result = subprocess.run(check_cmd, capture_output=True, text=True)
+            if instance_name in result.stdout:
+                self.logger.info(f"Apptainer instance '{instance_name}' already running.")
+                self.container = instance_name
+                return
+
+            # Prepare start command - always use Docker images
+            # Prepend docker:// if not already present
+            image_uri = docker_image
+            if not image_uri.startswith("docker://"):
+                image_uri = f"docker://{image_uri}"
+
+            start_cmd = ["apptainer", "instance", "start"]
+            
+            # Add binds if any
+            # docker_kwargs might contain 'volumes' or 'mounts'
+            # For now, we'll just handle simple binds if needed, or rely on default config
+            # But usually we need --writable-tmpfs to allow writing to the container
+            start_cmd.append("--writable-tmpfs")
+            # start_cmd.append("--net") # Enable network
+            # start_cmd.append("--network=none") # Isolate network if needed, but usually we want net access?
+            # Actually, let's stick to defaults or what's needed.
+            # The user said "runs them with apptainer".
+            
+            start_cmd.append(image_uri)
+            start_cmd.append(instance_name)
+
+            self.logger.info(f"Starting Apptainer instance: {' '.join(start_cmd)}")
+            subprocess.run(start_cmd, check=True)
+            self.container = instance_name
+            self.logger.info(f"Apptainer instance '{instance_name}' started.")
+
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Failed to start Apptainer instance: {e}")
+            raise RuntimeError(f"Failed to start Apptainer instance: {e}")
+
+    def _run_apptainer(
+        self,
+        code: str,
+        timeout: int = CMD_TIMEOUT,
+        args: str = "",
+        workdir: str = "",
+    ) -> tuple[str, str]:
+        """
+        Executes a command in the Apptainer instance.
+        """
+        command = ""
+        if workdir:
+            command += f"cd {workdir} && "
+        command += f"timeout {timeout} {code} {args}"
+        
+        full_command = ["apptainer", "exec", f"instance://{self.container_name}", "/bin/sh", "-c", command]
+        
+        try:
+            result = subprocess.run(
+                full_command,
+                capture_output=True,
+                text=True,
+                timeout=timeout + 5
+            )
+            
+            output = result.stdout + result.stderr
+            exit_code = result.returncode
+            
+            if exit_code == 124: # timeout exit code
+                 self.logger.error(f"Internal Timeout via 'timeout' command: {timeout}s")
+                 return f"The command took too long to execute (>{timeout}s)", "-1"
+
+            if exit_code != 0:
+                 # self.logger.error(f"Apptainer exec Error: Exit code {exit_code}\nError Message: {output}")
+                 pass # Let the caller handle the error logging if needed, or log it here.
+            
+            # Remove ANSI escape codes and \r characters
+            output = re.sub(r"\x1b\[[0-9;]*m|\r", "", output)
+            return output, str(exit_code)
+
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"Apptainer exec Overall Timeout: {timeout + 5}s")
+            return f"The command took too long to execute (>{timeout}s)", "-1"
+        except Exception as e:
+            self.logger.error(f"Unexpected error during Apptainer exec: {repr(e)}")
+            return f"Error: {repr(e)}", "-1"
+
+    def _stop_apptainer_instance(self):
+        try:
+            stop_cmd = ["apptainer", "instance", "stop", self.container_name]
+            subprocess.run(stop_cmd, check=True)
+            self.logger.info(f"Apptainer instance '{self.container_name}' stopped.")
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Failed to stop Apptainer instance: {e}")
+
+    def _copy_to_apptainer(self, src_path: str, dest_path: str):
+        """
+        Copies a file from host to Apptainer instance.
+        Since we can't easily 'cp' into a running instance unless we have a bind mount,
+        we'll use 'cat' to write the file content.
+        """
+        try:
+            # Read source file
+            with open(src_path, "rb") as f:
+                content = f.read()
+            
+            # We need to encode content to base64 to avoid shell issues, then decode inside
+            import base64
+            b64_content = base64.b64encode(content).decode('utf-8')
+            
+            # Command to write file
+            # mkdir -p $(dirname dest_path) && echo b64_content | base64 -d > dest_path
+            dest_dir = os.path.dirname(dest_path)
+            cmd = f"mkdir -p {dest_dir} && echo '{b64_content}' | base64 -d > {dest_path}"
+            
+            full_command = ["apptainer", "exec", f"instance://{self.container_name}", "/bin/sh", "-c", cmd]
+            subprocess.run(full_command, check=True, capture_output=True)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to copy file to Apptainer instance: {e}")
+            raise
+
+    def copy_to_container(self, src_path: str, dest_path: str):
+        """
+        Copies a file or directory from the host into the container (Docker or Kubernetes).
+        """
+        if self.backend == "docker":
+            tar_stream = io.BytesIO()
+            with tarfile.open(fileobj=tar_stream, mode="w") as tar:
+                tar.add(src_path, arcname=os.path.basename(dest_path))
+            tar_stream.seek(0)
+            self.container.put_archive(os.path.dirname(dest_path), tar_stream.read())
+        elif self.backend == "apptainer":
+            return self._copy_to_apptainer(src_path, dest_path)
+        else:
+            # Kubernetes pod copy
+            return self._copy_to_container_kubernetes(src_path, dest_path)
     def start_container(
         self, docker_image: str, command: str, ctr_name: str, **docker_kwargs
     ):
@@ -373,6 +537,10 @@ class DockerRuntime(ExecutionEnvironment):
                     )
             elif self.backend == "kubernetes":
                 self._start_kubernetes_pod(
+                    docker_image, command, ctr_name, **docker_kwargs
+                )
+            elif self.backend == "apptainer":
+                self._start_apptainer_instance(
                     docker_image, command, ctr_name, **docker_kwargs
                 )
         except Exception as e:
@@ -452,6 +620,8 @@ class DockerRuntime(ExecutionEnvironment):
                     self.container.remove()
                 elif self.backend == "kubernetes":
                     self._stop_kubernetes_pod()
+                elif self.backend == "apptainer":
+                    self._stop_apptainer_instance()
         except Exception as e:
             print("Container stop/delete error:", repr(e))
     
@@ -707,6 +877,8 @@ class DockerRuntime(ExecutionEnvironment):
 
         if self.backend == "kubernetes":
             return self._run_kubernetes(exec_code, timeout, args, workdir=exec_workdir)
+        elif self.backend == "apptainer":
+            return self._run_apptainer(exec_code, timeout, args, workdir=exec_workdir)
 
         command = f"timeout {timeout} {exec_code} {args}"
         try:
@@ -829,19 +1001,9 @@ class DockerRuntime(ExecutionEnvironment):
                     self.logger.error(f"Copy to container failed after {max_retries} attempts: {str(e)}")
                     raise
 
-    def copy_to_container(self, src_path: str, dest_path: str):
-        """
-        Copies a file or directory from the host into the container (Docker or Kubernetes).
-        """
-        if self.backend == "docker":
-            tar_stream = io.BytesIO()
-            with tarfile.open(fileobj=tar_stream, mode="w") as tar:
-                tar.add(src_path, arcname=os.path.basename(dest_path))
-            tar_stream.seek(0)
-            self.container.put_archive(os.path.dirname(dest_path), tar_stream.read())
-        else:
-            # Kubernetes pod copy
-            return self._copy_to_container_kubernetes(src_path, dest_path)
+
+        
+
 
     @DeprecationWarning  # TODO: remove dependency on this method with new dockers
     def read_file(self, rel_file_path: str) -> str:

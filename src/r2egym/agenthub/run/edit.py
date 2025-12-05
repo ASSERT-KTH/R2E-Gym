@@ -303,7 +303,7 @@ def runagent_multiple(
     skip_existing: bool = False,
     temperature: float = 0,
     use_fn_calling: bool = True,
-    backend: str = "kubernetes", # "kubernetes" or "docker"
+    backend: str = "kubernetes", # "kubernetes" or "docker" or "apptainer"
     max_reward_calc_time: int = 300,
     max_iterations: int = 1,
     scaffold: str = "r2egym",

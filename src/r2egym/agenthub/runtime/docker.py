@@ -426,6 +426,9 @@ class DockerRuntime(ExecutionEnvironment):
         Executes a command in the Apptainer instance.
         """
         command = ""
+        # Ensure PATH is set to DOCKER_PATH to be consistent with Docker/Kubernetes backends
+        command += f"export PATH={DOCKER_PATH} && "
+        
         if workdir:
             command += f"cd {workdir} && "
         command += f"timeout {timeout} {code} {args}"

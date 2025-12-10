@@ -120,11 +120,6 @@ class DockerRuntime(ExecutionEnvironment):
             raise ValueError(f"No docker image found in ds: {self.ds}")
         self.docker_image = ds_image if not docker_image else docker_image
         self.swebench_verified = "swebench" in self.docker_image
-        if self.swebench_verified:
-            # FIXME: we should have a ds on HF with the proper image name
-            image_name_tag = self.ds["instance_id"].replace("__", "_1776_")
-            image_name = f"docker.io/swebench/sweb.eval.x86_64.{image_name_tag}:latest"
-            self.docker_image = image_name
         self.swesmith = "swesmith" in self.docker_image
         if self.swesmith:
             image_name = self.ds['image_name'].replace('__', '_1776_')

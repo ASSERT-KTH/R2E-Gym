@@ -39,7 +39,7 @@ def test_start_instance(apptainer_instance):
 def test_run_command(apptainer_instance):
     """Test running a command in the Apptainer instance."""
     exec_cmd = [
-        "apptainer", "exec", f"instance://{apptainer_instance}", 
+        "apptainer", "exec", "--pwd", "/", f"instance://{apptainer_instance}", 
         "/bin/sh", "-c", "echo 'Hello from Apptainer with Docker image'"
     ]
     result = subprocess.run(exec_cmd, check=True, capture_output=True, text=True)
@@ -53,7 +53,7 @@ def test_copy_file_base64(apptainer_instance):
     test_content = "Test file content from Docker image"
     b64_content = base64.b64encode(test_content.encode()).decode('utf-8')
     copy_cmd = [
-        "apptainer", "exec", f"instance://{apptainer_instance}", "/bin/sh", "-c",
+        "apptainer", "exec", "--pwd", "/", f"instance://{apptainer_instance}", "/bin/sh", "-c",
         f"mkdir -p /tmp && echo '{b64_content}' | base64 -d > /tmp/test_file.txt"
     ]
     result = subprocess.run(copy_cmd, check=True, capture_output=True, text=True)
@@ -65,7 +65,7 @@ def test_verify_file_content(apptainer_instance):
     """Test verifying the copied file content."""
     test_content = "Test file content from Docker image"
     verify_cmd = [
-        "apptainer", "exec", f"instance://{apptainer_instance}", 
+        "apptainer", "exec", "--pwd", "/", f"instance://{apptainer_instance}", 
         "/bin/sh", "-c", "cat /tmp/test_file.txt"
     ]
     result = subprocess.run(verify_cmd, check=True, capture_output=True, text=True)

@@ -392,17 +392,10 @@ class DockerRuntime(ExecutionEnvironment):
 
             start_cmd = ["apptainer", "instance", "start"]
             
-            # Add binds if any
-            # docker_kwargs might contain 'volumes' or 'mounts'
-            # For now, we'll just handle simple binds if needed, or rely on default config
             # But usually we need --writable-tmpfs to allow writing to the container
             start_cmd.append("--writable-tmpfs")
             start_cmd.append("--fakeroot")
-            # start_cmd.append("--net") # Enable network
-            # start_cmd.append("--network=none") # Isolate network if needed, but usually we want net access?
-            # Actually, let's stick to defaults or what's needed.
-            # The user said "runs them with apptainer".
-            
+            start_cmd.append("--containall") # isolate local files from the container, do not automatically share them            
             start_cmd.append(image_uri)
             start_cmd.append(instance_name)
 
@@ -433,7 +426,7 @@ class DockerRuntime(ExecutionEnvironment):
             command += f"cd {workdir} && "
         command += f"timeout {timeout} {code} {args}"
         
-        full_command = ["apptainer", "exec", f"instance://{self.container_name}", "/bin/sh", "-c", command]
+        full_command = ["apptainer", "exec", "--pwd", "/", f"instance://{self.container_name}", "/bin/sh", "-c", command]
         
         try:
             result = subprocess.run(
@@ -493,7 +486,7 @@ class DockerRuntime(ExecutionEnvironment):
             dest_dir = os.path.dirname(dest_path)
             cmd = f"mkdir -p {dest_dir} && echo '{b64_content}' | base64 -d > {dest_path}"
             
-            full_command = ["apptainer", "exec", f"instance://{self.container_name}", "/bin/sh", "-c", cmd]
+            full_command = ["apptainer", "exec", "--pwd", "/", f"instance://{self.container_name}", "/bin/sh", "-c", cmd]
             subprocess.run(full_command, check=True, capture_output=True)
             
         except Exception as e:

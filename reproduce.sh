@@ -43,7 +43,7 @@ export EXP_NAME="deepswe_32b_agent_swebv_eval_temp_1_run_1"
 
 # Run the DeepSWE agent on SWE-Bench Verified
 time uv run python src/r2egym/agenthub/run/edit.py runagent_multiple \
-    --traj_dir "./traj" \
+    --traj_dir "./traj_deepswe32b" \
     --max_workers 48 \
     --start_idx 0 \
     --k 500 \

@@ -151,7 +151,9 @@ class Agent:
         return token_count
 
     def model_query(
-        self, messages: List[Dict[str, str]], temperature: float = 0,) -> Dict[str, Any]:
+        self, messages: List[Dict[str, str]], temperature: float = 0,
+        top_p: Optional[float] = None, top_k: Optional[int] = None, min_p: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Query the LLM with the messages and measure execution time."""
         response = None
         retries = 0
@@ -201,6 +203,14 @@ class Agent:
                     kwargs = {}
                 if "o3" not in self.llm_name and "o4" not in self.llm_name:
                     kwargs["temperature"] = temperature
+                    if top_p is not None:
+                        kwargs["top_p"] = top_p
+                    if top_k is not None:
+                        kwargs["extra_body"] = kwargs.get("extra_body", {})
+                        kwargs["extra_body"]["top_k"] = top_k
+                    if min_p is not None:
+                        kwargs["extra_body"] = kwargs.get("extra_body", {})
+                        kwargs["extra_body"]["min_p"] = min_p
                 response = litellm.completion(
                     model=self.llm_name,
                     tools=tools,
@@ -314,8 +324,11 @@ class Agent:
         max_exec_time: int = 90,  # 5 mins per env execution
         max_total_time: int = 50000,  # 20 minutes overall agent run limit
         max_llm_time: int = 7200,  # 2 mins per LLM timeout (note this is per query exlcuding retries | not enforcing hard limit since llm might hit rate limits etc)
-        # temperature
+        # sampling parameters
         temperature=0,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        min_p: Optional[float] = None,
         # additional metadata e.g. for hints / additional inputs etc
         metadata: Optional[Dict[str, Any]] = {},
         scaffold: str = "r2egym",
@@ -404,7 +417,7 @@ class Agent:
             # Query the LLM
             messages = copy.deepcopy(self.history)
             try:
-                response, llm_exec_time = self.model_query(messages, temperature)
+                response, llm_exec_time = self.model_query(messages, temperature, top_p, top_k, min_p)
             except Exception as e:
                 self.logger.error(f"Error querying LLM: {e}")
                 self.logger.error(f"Error querying LLM: {traceback.format_exc()}")

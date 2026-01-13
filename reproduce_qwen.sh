@@ -6,6 +6,7 @@
 #SBATCH --gpus 8
 #SBATCH --time=12:00:00
 #SBATCH -C "fat"
+#SBATCH --array=0
 
 wait_for_vllm() {
   local url="$1"; local -i tries=180
@@ -26,7 +27,7 @@ CMD=(uv run vllm serve Qwen/Qwen3-32B \
     --max-model-len $MAX_CONTEXT_LEN \
     --hf-overrides '{"max_position_embeddings": '$MAX_CONTEXT_LEN'}' \
     --enable_prefix_caching)
-"${CMD[@]}" > "logs/vllm_${SLURM_JOB_ID:-$$}.log" 2>&1 &
+"${CMD[@]}" > "logs/vllm_${SLURM_JOB_ID:-$$}_${SLURM_ARRAY_TASK_ID:-0}.log" 2>&1 &
 VLLM_PID=$!
 trap 'if [[ -n "$VLLM_PID" ]]; then kill "$VLLM_PID" 2>/dev/null || true; fi' EXIT
 
@@ -38,12 +39,16 @@ fi
 
 
 # Set required environment variables
-export TEMP=1
-export EXP_NAME="qwen3_32b_agent_swebv_eval_temp_1_run_1"
+export RUN_ID="${SLURM_ARRAY_TASK_ID:-0}"
+export TEMP=0.6
+export TOP_P=0.95
+export TOP_K=20
+export MIN_P=0
+export EXP_NAME="qwen3_32b_agent_swebv_eval_temp_${TEMP}_run_${RUN_ID}"
 
 # Run the DeepSWE agent on SWE-Bench Verified
 time uv run python src/r2egym/agenthub/run/edit.py runagent_multiple \
-    --traj_dir "./traj_qwen32b" \
+    --traj_dir "./traj_qwen32b_run_${RUN_ID}" \
     --max_workers 48 \
     --start_idx 0 \
     --k 500 \
@@ -54,7 +59,15 @@ time uv run python src/r2egym/agenthub/run/edit.py runagent_multiple \
     --use_fn_calling False \
     --exp_name "$EXP_NAME" \
     --temperature "$TEMP" \
+    --top_p "$TOP_P" \
+    --top_k "$TOP_K" \
+    --min_p "$MIN_P" \
     --max_steps_absolute 100 \
     --backend "apptainer" \
     --max_reward_calc_time 1200 \
     --max_tokens 65536
+
+# Create SWE-Bench submission file
+uv run python src/r2egym/agenthub/trajectory/create_swebench_submission.py \
+    --traj_file_path "traj_qwen32b_run_${RUN_ID}/${EXP_NAME}.jsonl" \
+    --output_json_path "traj_qwen32b_run_${RUN_ID}/qwen3_32b__r2egym__run_${RUN_ID}.json"

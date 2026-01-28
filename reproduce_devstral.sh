@@ -5,7 +5,7 @@
 set -euo pipefail
 
 # Defaults
-NUM_RUNS=1
+NUM_RUNS=10
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -20,9 +20,9 @@ done
 
 # Hyperparameters
 TOKEN_LIMIT=256000
-TOOL_LIMIT=500
+TOOL_LIMIT=100
 TEMP=0.2
-MAX_WORKERS=16
+MAX_WORKERS=10
 
 echo "Running $NUM_RUNS devstral run(s) sequentially"
 
@@ -53,7 +53,7 @@ for ((run=0; run<NUM_RUNS; run++)); do
       --exp_name "$EXP_NAME" \
       --temperature "$TEMP" \
       --max_steps_absolute "$TOOL_LIMIT" \
-      --backend "docker" \
+      --backend "apptainer" \
       --max_reward_calc_time 1200 \
       --max_tokens "$TOKEN_LIMIT"; then
 

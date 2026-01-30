@@ -153,11 +153,13 @@ class Agent:
     def model_query(
         self, messages: List[Dict[str, str]], temperature: float = 0,
         top_p: Optional[float] = None, top_k: Optional[int] = None, min_p: Optional[float] = None,
+        max_context_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Query the LLM with the messages and measure execution time."""
         response = None
         retries = 0
         tools = None
+        context_limit = max_context_tokens if max_context_tokens is not None else MAX_CONTEXT_TOKENS
 
         if self.use_fn_calling:
             if self.scaffold == "r2egym":
@@ -188,9 +190,9 @@ class Agent:
 
         messages_ = copy.deepcopy(messages)
         total_tokens = self._count_tokens(messages_)
-        if total_tokens > MAX_CONTEXT_TOKENS:
-            logger.warning(f"Total tokens: {total_tokens} > {MAX_CONTEXT_TOKENS}")
-            raise ValueError(f"Total tokens: {total_tokens} > {MAX_CONTEXT_TOKENS}")
+        if total_tokens > context_limit:
+            logger.warning(f"Total tokens: {total_tokens} > {context_limit}")
+            raise ValueError(f"Total tokens: {total_tokens} > {context_limit}")
         
         # query the model with retries
         while retries < self.max_retries:
@@ -417,7 +419,10 @@ class Agent:
             # Query the LLM
             messages = copy.deepcopy(self.history)
             try:
-                response, llm_exec_time = self.model_query(messages, temperature, top_p, top_k, min_p)
+                response, llm_exec_time = self.model_query(
+                    messages, temperature, top_p, top_k, min_p,
+                    max_context_tokens=max_token_limit,
+                )
             except Exception as e:
                 self.logger.error(f"Error querying LLM: {e}")
                 self.logger.error(f"Error querying LLM: {traceback.format_exc()}")

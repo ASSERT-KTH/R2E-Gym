@@ -3,9 +3,10 @@
 import openai
 import re
 import yaml
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 import json
 import concurrent.futures
@@ -364,25 +365,55 @@ def runagent_multiple(
     # Generate a filename for the JSONL file
     jsonl_file = traj_dir_path / f"{exp_name}.jsonl"
 
+    # Exit reasons that mean the run failed; all others (agent, max_step_limit, etc.) are valid
+    ERROR_EXIT_REASONS = {"llm_query_error"}
+
+    def _is_error_exit_reason(traj: Trajectory) -> bool:
+        reason = getattr(traj, "exit_reason", None)
+        if reason is None or not isinstance(reason, str):
+            return True  # missing or malformed -> treat as error, re-run
+        return reason.strip().lower() in ERROR_EXIT_REASONS
+
     if use_existing:
         if jsonl_file.exists():
             with open(jsonl_file) as f:
-                existing_dockers = []
+                # docker_image -> last trajectory (last line wins if duplicates)
+                existing_by_image: Dict[str, Trajectory] = {}
                 for line in f.readlines():
+                    line = line.strip()
+                    if not line:
+                        continue
                     try:
-                        existing_dockers.append(
-                            Trajectory.load_from_model_dump_json(line).ds[
-                                "docker_image"
-                            ]
-                        )
-                    except:
-                        print("error in jsonl file")
+                        traj = Trajectory.load_from_model_dump_json(line)
+                        di = traj.ds.get("docker_image") if traj.ds else None
+                        if di is not None:
+                            existing_by_image[di] = traj
+                    except Exception as e:
+                        logger.warning(f"Could not parse trajectory line: {e}")
 
-            ds_selected = [
-                ds_entry
-                for ds_entry in ds_selected
-                if ds_entry["docker_image"] not in existing_dockers
-            ]
+            # Count exit_reasons in loaded file (for debugging)
+            loaded_exit_reasons = Counter(
+                getattr(t, "exit_reason", None) for t in existing_by_image.values()
+            )
+
+            # Run only for samples that have no trajectory or finished with an error exit_reason
+            n_missing = 0
+            n_error = 0
+            new_ds_selected = []
+            for ds_entry in ds_selected:
+                di = ds_entry["docker_image"]
+                if di not in existing_by_image:
+                    n_missing += 1
+                    new_ds_selected.append(ds_entry)
+                elif _is_error_exit_reason(existing_by_image[di]):
+                    n_error += 1
+                    new_ds_selected.append(ds_entry)
+            ds_selected = new_ds_selected
+            logger.info(
+                f"Resume: loaded {len(existing_by_image)} existing trajectories "
+                f"(exit_reasons: {dict(loaded_exit_reasons)}); "
+                f"{len(ds_selected)} samples to run ({n_missing} missing, {n_error} error exit_reason)."
+            )
 
     if skip_existing:
         old_jsonl_files_glob = f"{exp_name[:-1]}*"
@@ -404,6 +435,47 @@ def runagent_multiple(
     logger.info(
         f"Starting editagent on {len(ds_selected)} Docker images after filtering."
     )
+
+    # Before re-running: remove lines for instances we're about to re-run so we don't append duplicates
+    if ds_selected and use_existing and jsonl_file.exists():
+        to_rerun = {ds_entry["docker_image"] for ds_entry in ds_selected}
+        with open(jsonl_file) as f:
+            lines = f.readlines()
+        best_per_di: Dict[str, Tuple[Trajectory, str]] = {}
+        order: List[str] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                traj = Trajectory.load_from_model_dump_json(line)
+                di = traj.ds.get("docker_image") if traj.ds else None
+                if di is None:
+                    continue
+                is_error = _is_error_exit_reason(traj)
+                if di not in best_per_di:
+                    order.append(di)
+                    best_per_di[di] = (traj, line)
+                else:
+                    prev_traj, _ = best_per_di[di]
+                    prev_error = _is_error_exit_reason(prev_traj)
+                    if not is_error and prev_error:
+                        best_per_di[di] = (traj, line)
+                    elif is_error and not prev_error:
+                        pass
+                    else:
+                        best_per_di[di] = (traj, line)
+            except Exception as e:
+                logger.warning(f"Could not parse trajectory line when pruning: {e}")
+        kept_lines = [
+            best_per_di[di][1] for di in order if di not in to_rerun
+        ]
+        with open(jsonl_file, "w") as f:
+            for ln in kept_lines:
+                f.write(ln if ln.endswith("\n") else ln + "\n")
+        logger.info(
+            f"Pruned jsonl to {len(kept_lines)} lines (removed {len(to_rerun)} to be re-run)."
+        )
 
     # Prepull all Docker images in parallel before starting main execution
     if ds_selected and prepull_images:
